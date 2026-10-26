@@ -9,3 +9,5 @@ pubspec.lock
 *.iml
 .idea/
 .metadata
+__pycache__/
+*.pyc
