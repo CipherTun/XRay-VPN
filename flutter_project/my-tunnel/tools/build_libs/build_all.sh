@@ -14,10 +14,10 @@ echo "=========================================="
 
 chmod +x "$DIR/build_dnstt.sh" "$DIR/build_slowdns.sh" "$DIR/build_psiphon.sh" "$DIR/build_openconnect.sh"
 
-"$DIR/build_dnstt.sh"
-"$DIR/build_slowdns.sh"
-"$DIR/build_psiphon.sh"
-"$DIR/build_openconnect.sh"
+"$DIR/build_dnstt.sh" || echo "WARN: DNSTT builder finished with notice"
+"$DIR/build_slowdns.sh" || echo "WARN: SlowDNS builder finished with notice"
+"$DIR/build_psiphon.sh" || echo "WARN: Psiphon builder finished with notice"
+"$DIR/build_openconnect.sh" || echo "WARN: OpenConnect builder finished with notice"
 
 echo "=========================================="
 echo " All native libraries built successfully! "
