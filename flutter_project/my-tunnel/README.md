@@ -22,7 +22,7 @@ All networking is real: the TUN/VPN service and protocol cores come from `flutte
 * **OpenConnect (Cisco AnyConnect / ocserv)**: Full SSL VPN gateway client with cert pin, authgroup, and WebVPN cookie support (`tools/build_libs/build_openconnect.sh`).
 * **Psiphon Tunnel Core**: Obfuscated multi-transport tunnel with region egress selection and custom header support (`tools/build_libs/build_psiphon.sh`).
 * **Per-ABI Split Release APKs**: CI now generates isolated, unmixed release APKs: `xray-vpn-arm64-v8a.apk` and `xray-vpn-armeabi-v7a.apk` via `--split-per-abi` with dedicated NDK filters, keeping 64-bit and 32-bit `.so` libraries strictly separated without bloated universal packaging.
-* **Core Upgrades**: Upgraded to **`dartssh2: ^4.0.1`** (the latest major v4.x release with background isolate cryptographic key exchange, custom client `ident`, and strict `SSHHostkeyError` mitigation), `openvpn_flutter: ^2.0.4` (with `onActivityResult` permission hook), and `flutter_v2ray_client` with WireGuard reserved bytes support.
+* **Core Upgrades**: Upgraded to **`dartssh2: ^4.0.1`** (the latest major v4.x release with background isolate cryptographic key exchange, custom client `ident`, and strict `SSHHostkeyError` mitigation), `openvpn_flutter: ^1.3.4` (with `onActivityResult` permission hook), and `flutter_v2ray_client` with WireGuard reserved bytes support.
 * **VpnService Loopback Forwarder**: All custom protocols feed into the Android VpnService via local loopback forwarders, ensuring 100% of device applications are routed through the tunnel.
 
 ## 2.3.2 - Connection Timeout & Native Crash Fixes
