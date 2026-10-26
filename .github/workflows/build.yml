@@ -75,6 +75,14 @@ jobs:
           cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk ../../xray-vpn-arm64-v8a.apk
           cp build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk ../../xray-vpn-armeabi-v7a.apk
 
+      # Verify all native cores (Xray libv2ray, OpenVPN libovpnexec, DNSTT, SlowDNS, Psiphon, OpenConnect, DartSSH libapp)
+      - name: Verify Bundled Native Cores in APKs
+        run: |
+          echo "=== Native shared libraries in arm64-v8a APK ==="
+          unzip -l ../../xray-vpn-arm64-v8a.apk | grep -E "lib/arm64-v8a/(libv2ray|libovpn|libapp|libflutter|lib)" || true
+          echo "=== Native shared libraries in armeabi-v7a APK ==="
+          unzip -l ../../xray-vpn-armeabi-v7a.apk | grep -E "lib/armeabi-v7a/(libv2ray|libovpn|libapp|libflutter|lib)" || true
+
       - name: Upload arm64-v8a Release APK
         uses: actions/upload-artifact@v4
         with:

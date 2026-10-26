@@ -223,15 +223,14 @@ for path in files:
 
     # Add local AAR support for custom protocol engines
     os.makedirs("android/app/libs", exist_ok=True)
-    if "flatDir" not in t:
-        flat_block = "\nrepositories {\n    flatDir {\n        dirs 'libs'\n    }\n}\n"
-        t += flat_block
-
-    if "fileTree(dir: 'libs'" not in t:
-        dep_block = (
-            "\ndependencies {\n    implementation fileTree(dir: 'libs', include: ['*.jar', '*.aar'])\n}\n"
-        )
-        t += dep_block
+    if path.endswith(".kts"):
+        if "include(listOf" not in t and "fileTree" not in t:
+            t += '\ndependencies {\n    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.jar", "*.aar"))))\n}\n'
+    else:
+        if "flatDir" not in t:
+            t += "\nrepositories {\n    flatDir {\n        dirs 'libs'\n    }\n}\n"
+        if "fileTree(dir: 'libs'" not in t:
+            t += "\ndependencies {\n    implementation fileTree(dir: 'libs', include: ['*.jar', '*.aar'])\n}\n"
 
     with open(path, "w", encoding="utf-8") as f:
         f.write(t)
