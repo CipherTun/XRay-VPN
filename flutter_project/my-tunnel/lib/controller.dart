@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
-import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_v2ray_client/flutter_v2ray.dart';
@@ -16,6 +15,21 @@ import 'native.dart';
 import 'ssh_tunnel.dart';
 import 'subscription.dart';
 import 'usage.dart';
+
+extension VPNStageExt on ovpn.VPNStage {
+  bool get isConnected => this == ovpn.VPNStage.connected;
+  bool get isConnecting =>
+      this == ovpn.VPNStage.connecting ||
+      this == ovpn.VPNStage.authenticating ||
+      this == ovpn.VPNStage.waitConnection ||
+      this == ovpn.VPNStage.reconnect;
+  bool get isDisconnected =>
+      this == ovpn.VPNStage.disconnected ||
+      this == ovpn.VPNStage.denied ||
+      this == ovpn.VPNStage.error ||
+      this == ovpn.VPNStage.unknown ||
+      this == ovpn.VPNStage.exited;
+}
 
 enum ConnState { disconnected, connecting, connected }
 
@@ -121,7 +135,11 @@ class VpnController extends ChangeNotifier {
         localizedDescription: 'XRay Vpn',
         lastStage: (ovpn.VPNStage s) {
           // OpenVPN lives in its own process; clean up a tunnel we no longer control.
-          if (_root == null && (s.isConnected || s.isConnecting)) unawaited(_ovpn.disconnect());
+          if (_root == null && (s.isConnected || s.isConnecting)) {
+            try {
+              _ovpn.disconnect();
+            } catch (_) {}
+          }
         },
       );
     } catch (e) {
@@ -657,10 +675,10 @@ class VpnController extends ChangeNotifier {
     if (s == null || _root == null || !_ovpnActive) return;
     final up = int.tryParse('${s.byteOut}') ?? 0;
     final down = int.tryParse('${s.byteIn}') ?? 0;
+    if (_prevUp > 0 && up >= _prevUp) upSpeed = up - _prevUp;
+    if (_prevDown > 0 && down >= _prevDown) downSpeed = down - _prevDown;
     upTotal = up;
     downTotal = down;
-    upSpeed = int.tryParse('${s.speedOut}') ?? 0;
-    downSpeed = int.tryParse('${s.speedIn}') ?? 0;
     duration = '${s.duration ?? '00:00:00'}';
     _account(up, down);
     _pushHistory();
@@ -821,7 +839,7 @@ class VpnController extends ChangeNotifier {
       _ovpnUp = null;
       if (ou != null && !ou.isCompleted) ou.completeError('stopped');
       try {
-        await _ovpn.disconnect();
+        _ovpn.disconnect();
       } catch (_) {}
     }
     try {
@@ -956,9 +974,7 @@ class VpnController extends ChangeNotifier {
         p.name,
         username: user.isEmpty ? null : user,
         password: pass.isEmpty ? null : pass,
-        privateKeyPassword: kp.isEmpty ? null : kp,
         bypassPackages: settings.blockedApps.isEmpty ? null : settings.blockedApps,
-        certIsB64: false,
       );
     } catch (e) {
       _ovpnActive = false;
