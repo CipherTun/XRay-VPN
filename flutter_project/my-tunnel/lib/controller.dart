@@ -20,15 +20,12 @@ extension VPNStageExt on ovpn.VPNStage {
   bool get isConnected => this == ovpn.VPNStage.connected;
   bool get isConnecting =>
       this == ovpn.VPNStage.connecting ||
-      this == ovpn.VPNStage.authenticating ||
-      this == ovpn.VPNStage.waitConnection ||
-      this == ovpn.VPNStage.reconnect;
+      this == ovpn.VPNStage.authenticating;
   bool get isDisconnected =>
       this == ovpn.VPNStage.disconnected ||
       this == ovpn.VPNStage.denied ||
       this == ovpn.VPNStage.error ||
-      this == ovpn.VPNStage.unknown ||
-      this == ovpn.VPNStage.exited;
+      this == ovpn.VPNStage.unknown;
 }
 
 enum ConnState { disconnected, connecting, connected }
@@ -966,7 +963,7 @@ class VpnController extends ChangeNotifier {
     unawaited(up.future.catchError((Object _) {}));
     _ovpnUp = up;
     _ovpnActive = true;
-    final user = p.s('user'), pass = p.s('pass'), kp = p.s('keyPass');
+    final user = p.s('user'), pass = p.s('pass');
     final bool started;
     try {
       started = await _ovpn.connect(
