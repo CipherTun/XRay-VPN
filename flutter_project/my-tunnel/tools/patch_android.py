@@ -350,11 +350,12 @@ for folder, px in (("mdpi", 48), ("hdpi", 72), ("xhdpi", 96), ("xxhdpi", 144), (
     with open(os.path.join(d, "ic_launcher.png"), "wb") as f:
         f.write(icon(px))
 
-# ------------------------------------------------------------------- Ensure valid AAR structure (AndroidManifest.xml + strip duplicate go.Seq)
+# ------------------------------------------------------------------- Ensure valid AAR structure (AndroidManifest.xml, R.txt, res/ + strip duplicate go.Seq)
 def strip_go_classes_from_aars():
     libs_dir = "android/app/libs"
     if not os.path.exists(libs_dir):
         return
+    values_xml = b'<?xml version="1.0" encoding="utf-8"?>\n<resources>\n</resources>\n'
     for aar_name in os.listdir(libs_dir):
         if not aar_name.endswith(".aar"):
             continue
@@ -366,17 +367,30 @@ def strip_go_classes_from_aars():
             with zipfile.ZipFile(aar_path, "r") as aar_in:
                 aar_files = {name: aar_in.read(name) for name in aar_in.namelist()}
 
+            # If the archive was created directly from classes without classes.jar wrapper, wrap them
             if "classes.jar" not in aar_files:
-                continue
+                jar_buf = io.BytesIO()
+                with zipfile.ZipFile(jar_buf, "w", compression=zipfile.ZIP_DEFLATED) as jout:
+                    for name, content in list(aar_files.items()):
+                        if name.endswith(".class") or name.startswith("META-INF/"):
+                            jout.writestr(name, content)
+                aar_files = {"classes.jar": jar_buf.getvalue()}
 
             # Ensure AndroidManifest.xml exists with unique package namespace
             aar_files["AndroidManifest.xml"] = manifest_xml
+            
+            # Ensure R.txt exists
+            if "R.txt" not in aar_files:
+                aar_files["R.txt"] = b""
+
+            # Ensure res/values/values.xml exists
+            if "res/values/values.xml" not in aar_files and "res/values/" not in aar_files:
+                aar_files["res/values/values.xml"] = values_xml
 
             jar_bytes = aar_files["classes.jar"]
             jar_in_buf = io.BytesIO(jar_bytes)
             jar_out_buf = io.BytesIO()
 
-            modified = True  # force rewrite with AndroidManifest.xml
             with zipfile.ZipFile(jar_in_buf, "r") as jar_in:
                 with zipfile.ZipFile(jar_out_buf, "w", compression=zipfile.ZIP_DEFLATED) as jar_out:
                     for item in jar_in.infolist():
@@ -388,7 +402,7 @@ def strip_go_classes_from_aars():
             with zipfile.ZipFile(aar_path, "w", compression=zipfile.ZIP_DEFLATED) as aar_out:
                 for name, content in aar_files.items():
                     aar_out.writestr(name, content)
-            print(f"Patched AAR {aar_name} with AndroidManifest.xml and clean classes.jar")
+            print(f"Patched AAR {aar_name} with valid structure, Manifest and clean classes.jar")
         except Exception as e:
             print(f"Notice patching AAR {aar_name}: {e}")
 
