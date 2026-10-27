@@ -9,7 +9,6 @@ import android.content.Intent
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
-import android.system.Os
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import libXray.DialerController
@@ -178,7 +177,7 @@ class XrayVpnService : VpnService() {
             try { LibXray.resetDNS() } catch (e: Exception) { Log.w(TAG, "DNS reset failed", e) }
             val fd = detachedTunFd
             detachedTunFd = -1
-            if (fd >= 0) try { Os.close(fd) } catch (e: Exception) { Log.w(TAG, "TUN fd close failed", e) }
+            if (fd >= 0) try { ParcelFileDescriptor.adoptFd(fd).close() } catch (e: Exception) { Log.w(TAG, "TUN fd close failed", e) }
             try { tun?.close() } catch (_: Exception) {}
             tun = null
         }
@@ -221,11 +220,17 @@ class XrayVpnService : VpnService() {
         @Volatile private var controllersRegistered = false
         private val CONTROLLER_LOCK = Any()
         private val SocketProtector = object : DialerController {
-            override fun protectFd(fd: Int): Boolean = try {
-                activeService?.protect(fd) == true
-            } catch (e: Exception) {
-                Log.e(TAG, "VpnService.protect($fd) failed", e)
-                false
+            override fun protectFd(fd: Long): Boolean {
+                if (fd < 0L || fd > Int.MAX_VALUE.toLong()) {
+                    Log.e(TAG, "Invalid socket file descriptor: $fd")
+                    return false
+                }
+                return try {
+                    activeService?.protect(fd.toInt()) == true
+                } catch (e: Exception) {
+                    Log.e(TAG, "VpnService.protect($fd) failed", e)
+                    false
+                }
             }
         }
 
