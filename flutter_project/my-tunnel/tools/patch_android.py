@@ -355,11 +355,13 @@ def strip_go_classes_from_aars():
     libs_dir = "android/app/libs"
     if not os.path.exists(libs_dir):
         return
-    manifest_xml = b'<?xml version="1.0" encoding="utf-8"?>\n<manifest xmlns:android="http://schemas.android.com/apk/res/android"\n    package="com.custom.tunnel">\n    <uses-sdk android:minSdkVersion="23" />\n</manifest>\n'
     for aar_name in os.listdir(libs_dir):
         if not aar_name.endswith(".aar"):
             continue
         aar_path = os.path.join(libs_dir, aar_name)
+        clean_name = aar_name[:-4].replace("-", "_").replace(".", "_")
+        pkg_name = f"com.custom.{clean_name}"
+        manifest_xml = f'<?xml version="1.0" encoding="utf-8"?>\n<manifest xmlns:android="http://schemas.android.com/apk/res/android"\n    package="{pkg_name}">\n    <uses-sdk android:minSdkVersion="23" />\n</manifest>\n'.encode("utf-8")
         try:
             with zipfile.ZipFile(aar_path, "r") as aar_in:
                 aar_files = {name: aar_in.read(name) for name in aar_in.namelist()}
@@ -367,7 +369,7 @@ def strip_go_classes_from_aars():
             if "classes.jar" not in aar_files:
                 continue
 
-            # Ensure AndroidManifest.xml exists
+            # Ensure AndroidManifest.xml exists with unique package namespace
             aar_files["AndroidManifest.xml"] = manifest_xml
 
             jar_bytes = aar_files["classes.jar"]
