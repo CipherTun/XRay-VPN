@@ -188,19 +188,8 @@ for path in files:
         t = re.sub(r"minifyEnabled\s+true", "minifyEnabled false", t)
         t = re.sub(r"shrinkResources\s+true", "shrinkResources false", t)
 
-    # Strict ABI filters: arm64-v8a and armeabi-v7a only (no mixing, no unneeded ABIs)
-    if path.endswith(".kts"):
-        abi_block = '        ndk {\n            abiFilters += listOf("arm64-v8a", "armeabi-v7a")\n        }\n'
-    else:
-        abi_block = '        ndk {\n            abiFilters "arm64-v8a", "armeabi-v7a"\n        }\n'
-
-    if "abiFilters" not in t:
-        t = re.sub(r'(?m)^(\s*)defaultConfig\s*\{', lambda m: m.group(0) + "\n" + abi_block, t, count=1)
-    else:
-        if path.endswith(".kts"):
-            t = re.sub(r'abiFilters\s+[^\n]+', 'abiFilters += listOf("arm64-v8a", "armeabi-v7a")', t)
-        else:
-            t = re.sub(r'abiFilters\s+[^\n]+', 'abiFilters "arm64-v8a", "armeabi-v7a"', t)
+    # Remove any conflicting ndk { abiFilters ... } block to allow splits.abi to manage ABI filtering
+    t = re.sub(r'(?s)\n\s*ndk\s*\{\s*abiFilters[^\}]*\}', '', t)
 
     # Enable ABI splits to build distinct, isolated APKs
     if "splits {" not in t:
