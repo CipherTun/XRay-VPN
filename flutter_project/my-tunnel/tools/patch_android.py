@@ -12,7 +12,9 @@ import math
 import os
 import re
 import shutil
+import io
 import struct
+import zipfile
 import zlib
 
 PKG = "xyz.xray.vpn"
@@ -348,11 +350,44 @@ for folder, px in (("mdpi", 48), ("hdpi", 72), ("xhdpi", 96), ("xxhdpi", 144), (
     with open(os.path.join(d, "ic_launcher.png"), "wb") as f:
         f.write(icon(px))
 
-# ------------------------------------------------------------------- tests
-default_test = "test/widget_test.dart"
-if os.path.exists(default_test):
-    with open(default_test, encoding="utf-8") as f:
-        if "package:vpn/main.dart" in f.read() and "Counter" in open(default_test).read():
-            os.remove(default_test)
+# ------------------------------------------------------------------- Strip duplicate go.Seq classes from AARs
+def strip_go_classes_from_aars():
+    libs_dir = "android/app/libs"
+    if not os.path.exists(libs_dir):
+        return
+    for aar_name in os.listdir(libs_dir):
+        if not aar_name.endswith(".aar"):
+            continue
+        aar_path = os.path.join(libs_dir, aar_name)
+        try:
+            with zipfile.ZipFile(aar_path, "r") as aar_in:
+                aar_files = {name: aar_in.read(name) for name in aar_in.namelist()}
+
+            if "classes.jar" not in aar_files:
+                continue
+
+            jar_bytes = aar_files["classes.jar"]
+            jar_in_buf = io.BytesIO(jar_bytes)
+            jar_out_buf = io.BytesIO()
+
+            modified = False
+            with zipfile.ZipFile(jar_in_buf, "r") as jar_in:
+                with zipfile.ZipFile(jar_out_buf, "w", compression=zipfile.ZIP_DEFLATED) as jar_out:
+                    for item in jar_in.infolist():
+                        if item.filename.startswith("go/"):
+                            modified = True
+                            continue  # Skip duplicate go.Seq classes
+                        jar_out.writestr(item, jar_in.read(item.filename))
+
+            if modified:
+                aar_files["classes.jar"] = jar_out_buf.getvalue()
+                with zipfile.ZipFile(aar_path, "w", compression=zipfile.ZIP_DEFLATED) as aar_out:
+                    for name, content in aar_files.items():
+                        aar_out.writestr(name, content)
+                print(f"Stripped duplicate go.Seq classes from {aar_name}")
+        except Exception as e:
+            print(f"Notice stripping {aar_name}: {e}")
+
+strip_go_classes_from_aars()
 
 print("Android patch completed.")
