@@ -160,6 +160,22 @@ for path in files:
                 '                "lib/**/libgojni.so"\n'
                 "            )\n"
                 "        }\n"
+                "        resources {\n"
+                "            pickFirsts += listOf(\n"
+                '                "go/error.java",\n'
+                '                "go/*.java",\n'
+                '                "go/**/*.java",\n'
+                '                "**/go/*.java",\n'
+                '                "**/go/error.java"\n'
+                "            )\n"
+                "            excludes += listOf(\n"
+                '                "go/error.java",\n'
+                '                "go/*.java",\n'
+                '                "go/**/*.java",\n'
+                '                "**/go/*.java",\n'
+                '                "**/go/error.java"\n'
+                "            )\n"
+                "        }\n"
                 "    }\n"
             )
         else:
@@ -169,6 +185,14 @@ for path in files:
                 "            useLegacyPackaging true\n"
                 "            pickFirst '**/libgojni.so'\n"
                 "            pickFirst 'lib/**/libgojni.so'\n"
+                "        }\n"
+                "        resources {\n"
+                "            pickFirst 'go/error.java'\n"
+                "            pickFirst 'go/*.java'\n"
+                "            pickFirst '**/go/*.java'\n"
+                "            exclude 'go/error.java'\n"
+                "            exclude 'go/*.java'\n"
+                "            exclude '**/go/*.java'\n"
                 "        }\n"
                 "    }\n"
             )
@@ -367,6 +391,9 @@ def strip_go_classes_from_aars():
             with zipfile.ZipFile(aar_path, "r") as aar_in:
                 aar_files = {name: aar_in.read(name) for name in aar_in.namelist()}
 
+            # Remove any sources jars or go source files from the AAR
+            aar_files = {name: content for name, content in aar_files.items() if not name.endswith("-sources.jar") and not name.startswith("go/") and not name.endswith(".java")}
+
             # If the archive was created directly from classes without classes.jar wrapper, wrap them
             if "classes.jar" not in aar_files:
                 jar_buf = io.BytesIO()
@@ -394,8 +421,8 @@ def strip_go_classes_from_aars():
             with zipfile.ZipFile(jar_in_buf, "r") as jar_in:
                 with zipfile.ZipFile(jar_out_buf, "w", compression=zipfile.ZIP_DEFLATED) as jar_out:
                     for item in jar_in.infolist():
-                        if item.filename.startswith("go/"):
-                            continue  # Skip duplicate go.Seq classes
+                        if item.filename.startswith("go/") or item.filename.endswith(".java"):
+                            continue  # Skip duplicate go.Seq classes and java source files
                         jar_out.writestr(item, jar_in.read(item.filename))
 
             aar_files["classes.jar"] = jar_out_buf.getvalue()
