@@ -153,6 +153,10 @@ for path in files:
                 "\n    packaging {\n"
                 "        jniLibs {\n"
                 "            useLegacyPackaging = true\n"
+                "            pickFirsts += listOf(\n"
+                '                "**/libgojni.so",\n'
+                '                "lib/**/libgojni.so"\n'
+                "            )\n"
                 "        }\n"
                 "    }\n"
             )
@@ -161,6 +165,8 @@ for path in files:
                 "\n    packagingOptions {\n"
                 "        jniLibs {\n"
                 "            useLegacyPackaging true\n"
+                "            pickFirst '**/libgojni.so'\n"
+                "            pickFirst 'lib/**/libgojni.so'\n"
                 "        }\n"
                 "    }\n"
             )
