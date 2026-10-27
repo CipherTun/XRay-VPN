@@ -374,6 +374,12 @@ for folder, px in (("mdpi", 48), ("hdpi", 72), ("xhdpi", 96), ("xxhdpi", 144), (
     with open(os.path.join(d, "ic_launcher.png"), "wb") as f:
         f.write(icon(px))
 
+# Write a flat PNG notification icon to drawable/ic_notification.png for NotificationCompat.Builder
+d_draw = "android/app/src/main/res/drawable"
+os.makedirs(d_draw, exist_ok=True)
+with open(os.path.join(d_draw, "ic_notification.png"), "wb") as f:
+    f.write(icon(48))
+
 # ------------------------------------------------------------------- Ensure valid AAR structure (AndroidManifest.xml, R.txt, res/ + strip duplicate go.Seq)
 def strip_go_classes_from_aars():
     libs_dir = "android/app/libs"

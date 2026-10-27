@@ -117,8 +117,8 @@ class VpnController extends ChangeNotifier {
     if (selected == null && profiles.isNotEmpty) selectedId = profiles.first.id;
     try {
       await _v2.initialize(
-        notificationIconResourceType: 'mipmap',
-        notificationIconResourceName: 'ic_launcher',
+        notificationIconResourceType: 'drawable',
+        notificationIconResourceName: 'ic_notification',
       );
       // A previous run may have left the VPN service up without its Dart-side
       // SSH tunnel (activity destroyed). Never show "disconnected" over a live
@@ -700,13 +700,22 @@ class VpnController extends ChangeNotifier {
   Future<void> connect() async {
     final p = selected;
     if (p == null || state != ConnState.disconnected) return;
-    _root = p;
-    _userStopped = false;
-    _retries = 0;
-    _gen++;
-    _resetStats();
-    bumpRotation();
-    await _run(_gen);
+    try {
+      _root = p;
+      _userStopped = false;
+      _retries = 0;
+      _gen++;
+      _resetStats();
+      bumpRotation();
+      await _run(_gen);
+    } catch (e) {
+      log('Connection failed: $e');
+      _root = null;
+      _active = null;
+      state = ConnState.disconnected;
+      _resetStats();
+      notifyListeners();
+    }
   }
 
   Future<void> disconnect() async {
