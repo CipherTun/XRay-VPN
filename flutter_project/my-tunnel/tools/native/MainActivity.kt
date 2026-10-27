@@ -3,6 +3,9 @@ package xyz.xray.vpn
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.net.VpnService
+import android.os.Handler
+import android.os.Looper
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
@@ -10,6 +13,7 @@ import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import libXray.LibXray
 
 /**
  * Small native bridge used by the Dart side (lib/native.dart):
@@ -21,6 +25,21 @@ class MainActivity : FlutterActivity() {
     private val channelName = "xyz.xray.vpn/native"
     private var channel: MethodChannel? = null
     private var pendingLink: String? = null
+
+    companion object {
+        private const val REQUEST_XRAY_VPN = 7314
+        @Volatile private var permissionResult: MethodChannel.Result? = null
+        @Volatile private var startResult: MethodChannel.Result? = null
+
+        fun completeXrayStart(error: String?) {
+            Handler(Looper.getMainLooper()).post {
+                val r = startResult
+                startResult = null
+                if (r == null) return@post
+                if (error == null) r.success(null) else r.error("xray_start_failed", error, null)
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -39,11 +58,11 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        try {
-            val clazz = Class.forName("id.laskarmedia.openvpn_flutter.OpenVPNFlutterPlugin")
-            val method = clazz.getMethod("connectWhileGranted", Boolean::class.javaPrimitiveType)
-            method.invoke(null, requestCode == 24 && resultCode == RESULT_OK)
-        } catch (_: Exception) {}
+        if (requestCode == REQUEST_XRAY_VPN) {
+            val r = permissionResult
+            permissionResult = null
+            r?.success(resultCode == RESULT_OK)
+        }
         super.onActivityResult(requestCode, resultCode, data)
     }
 
@@ -59,6 +78,102 @@ class MainActivity : FlutterActivity() {
         channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
         channel!!.setMethodCallHandler { call, result ->
                 when (call.method) {
+                    "requestXrayPermission" -> {
+                        val prepare = VpnService.prepare(this)
+                        if (prepare == null) {
+                            result.success(true)
+                        } else {
+                            permissionResult = result
+                            startActivityForResult(prepare, REQUEST_XRAY_VPN)
+                        }
+                    }
+                    "convertShareLink" -> {
+                        val args = call.arguments as? Map<*, *> ?: emptyMap<String, Any>()
+                        val link = args["text"] as? String ?: ""
+                        if (link.isBlank()) {
+                            result.error("invalid_link", "Share link is empty", null)
+                        } else {
+                            Thread {
+                                try {
+                                    val request = org.json.JSONObject()
+                                        .put("apiVersion", 3)
+                                        .put("method", "convertShareLinksToXrayJson")
+                                        .put("payload", org.json.JSONObject().put("text", link))
+                                    val response = LibXray.invoke(request.toString())
+                                    runOnUiThread { result.success(response) }
+                                } catch (e: Exception) {
+                                    runOnUiThread { result.error("libxray_convert", e.message, null) }
+                                }
+                            }.start()
+                        }
+                    }
+                    "startXray" -> {
+                        val args = call.arguments as? Map<*, *> ?: emptyMap<String, Any>()
+                        val config = args["config"] as? String ?: ""
+                        val proxyOnly = args["proxyOnly"] as? Boolean ?: false
+                        if (config.isBlank()) {
+                            result.error("invalid_config", "Xray configuration is empty", null)
+                        } else if (!proxyOnly && VpnService.prepare(this) != null) {
+                            result.error("vpn_permission", "VPN permission must be granted before starting", null)
+                        } else if (startResult != null) {
+                            result.error("already_starting", "An Xray start request is already pending", null)
+                        } else {
+                            startResult = result
+                            val serviceIntent = Intent(this, XrayVpnService::class.java)
+                                .setAction(XrayVpnService.ACTION_START)
+                                .putExtra(XrayVpnService.EXTRA_CONFIG, config)
+                                .putExtra(XrayVpnService.EXTRA_PROXY_ONLY, proxyOnly)
+                                .putStringArrayListExtra(XrayVpnService.EXTRA_DISALLOWED_APPS,
+                                    (args["disallowedApps"] as? List<*>)?.filterIsInstance<String>()?.let { ArrayList(it) } ?: arrayListOf())
+                                .putExtra(XrayVpnService.EXTRA_BYPASS_LAN, args["bypassLan"] as? Boolean ?: false)
+                                .putStringArrayListExtra(XrayVpnService.EXTRA_INCLUDE_ROUTES,
+                                    (args["includeRoutes"] as? List<*>)?.filterIsInstance<String>()?.let { ArrayList(it) } ?: arrayListOf("0.0.0.0/0"))
+                            try {
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(serviceIntent)
+                                else startService(serviceIntent)
+                            } catch (e: Exception) {
+                                startResult = null
+                                result.error("service_start", e.message, null)
+                            }
+                        }
+                    }
+                    "stopXray" -> {
+                        try {
+                            XrayVpnService.stopEngine(this)
+                            result.success(null)
+                        } catch (e: Exception) {
+                            result.error("xray_stop", e.message, null)
+                        }
+                    }
+                    "pingXray" -> {
+                        val args = call.arguments as? Map<*, *> ?: emptyMap<String, Any>()
+                        val config = args["config"] as? String ?: ""
+                        val url = args["url"] as? String ?: "https://cp.cloudflare.com/generate_204"
+                        Thread {
+                            try {
+                                val item = org.json.JSONObject().put("xrayJson", config).put("outboundTag", "proxy")
+                                val payload = org.json.JSONObject()
+                                    .put("configs", org.json.JSONArray().put(item))
+                                    .put("timeout", 5).put("url", url)
+                                val response = LibXray.invoke(org.json.JSONObject()
+                                    .put("apiVersion", 3).put("method", "pingBatch").put("payload", payload).toString())
+                                runOnUiThread { result.success(response) }
+                            } catch (e: Exception) {
+                                runOnUiThread { result.error("libxray_ping", e.message, null) }
+                            }
+                        }.start()
+                    }
+                    "xrayVersion" -> {
+                        Thread {
+                            try {
+                                val response = LibXray.invoke(org.json.JSONObject()
+                                    .put("apiVersion", 3).put("method", "xrayVersion").put("payload", org.json.JSONObject()).toString())
+                                runOnUiThread { result.success(response) }
+                            } catch (e: Exception) {
+                                runOnUiThread { result.error("libxray_version", e.message, null) }
+                            }
+                        }.start()
+                    }
                     "takeLink" -> {
                         val l = pendingLink
                         pendingLink = null
@@ -141,7 +256,7 @@ class MainActivity : FlutterActivity() {
                         } catch (e: Exception) {
                             android.util.Log.e("MainActivity", "DNSTT start failed: ${e.message}")
                         }
-                        result.success(true)
+                        result.error("engine_missing", "DNSTT engine is not bundled; refusing fake success.", null)
                     }
                     "stopDnstt" -> {
                         android.util.Log.i("MainActivity", "Stopping DNSTT engine")
@@ -171,7 +286,7 @@ class MainActivity : FlutterActivity() {
                         } catch (e: Exception) {
                             android.util.Log.e("MainActivity", "SlowDNS start failed: ${e.message}")
                         }
-                        result.success(true)
+                        result.error("engine_missing", "SlowDNS engine is not bundled; refusing fake success.", null)
                     }
                     "stopSlowDns" -> {
                         android.util.Log.i("MainActivity", "Stopping SlowDNS engine")
@@ -202,7 +317,7 @@ class MainActivity : FlutterActivity() {
                         } catch (e: Exception) {
                             android.util.Log.e("MainActivity", "OpenConnect start failed: ${e.message}")
                         }
-                        result.success(true)
+                        result.error("engine_missing", "OpenConnect engine is not bundled; refusing fake success.", null)
                     }
                     "stopOpenConnect" -> {
                         android.util.Log.i("MainActivity", "Stopping OpenConnect client")
@@ -229,7 +344,7 @@ class MainActivity : FlutterActivity() {
                         } catch (e: Exception) {
                             android.util.Log.e("MainActivity", "Psiphon start failed: ${e.message}")
                         }
-                        result.success(true)
+                        result.error("engine_missing", "Psiphon engine is not bundled; refusing fake success.", null)
                     }
                     "stopPsiphon" -> {
                         android.util.Log.i("MainActivity", "Stopping Psiphon tunnel")

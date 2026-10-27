@@ -4,7 +4,6 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter_v2ray_client/flutter_v2ray.dart';
 import 'package:openvpn_flutter/openvpn_flutter.dart' as ovpn;
 import 'package:permission_handler/permission_handler.dart';
 
@@ -16,17 +15,6 @@ import 'ssh_tunnel.dart';
 import 'subscription.dart';
 import 'usage.dart';
 
-extension VPNStageExt on ovpn.VPNStage {
-  bool get isConnected => this == ovpn.VPNStage.connected;
-  bool get isConnecting =>
-      this == ovpn.VPNStage.connecting ||
-      this == ovpn.VPNStage.authenticating;
-  bool get isDisconnected =>
-      this == ovpn.VPNStage.disconnected ||
-      this == ovpn.VPNStage.denied ||
-      this == ovpn.VPNStage.error ||
-      this == ovpn.VPNStage.unknown;
-}
 
 enum ConnState { disconnected, connecting, connected }
 
@@ -79,7 +67,6 @@ class VpnController extends ChangeNotifier {
   Completer<void>? _up;
   Map<String, String> _hosts = {};
   final SshTunnel _ssh = SshTunnel();
-  late final V2ray _v2 = V2ray(onStatusChanged: _onV2);
 
   Profile? get selected {
     for (final p in profiles) {
@@ -115,17 +102,11 @@ class VpnController extends ChangeNotifier {
     settings = await Store.loadSettings();
     selectedId = await Store.loadSelected() ?? (profiles.isNotEmpty ? profiles.first.id : null);
     if (selected == null && profiles.isNotEmpty) selectedId = profiles.first.id;
+    // Clear any stale managed libXray instance left by an interrupted process.
     try {
-      await _v2.initialize(
-        notificationIconResourceType: 'drawable',
-        notificationIconResourceName: 'ic_notification',
-      );
-      // A previous run may have left the VPN service up without its Dart-side
-      // SSH tunnel (activity destroyed). Never show "disconnected" over a live
-      // but dead tunnel: start clean.
-      await _v2.stopV2Ray();
+      await Native.stopXray();
     } catch (e) {
-      log('Core init failed: $e');
+      log('libXray cleanup: $e');
     }
     try {
       await _ovpn.initialize(
@@ -351,15 +332,15 @@ class VpnController extends ChangeNotifier {
               int.tryParse(proxy.isNotEmpty ? p.s('proxyPort') : p.s('port')) ??
                   (proxy.isNotEmpty ? 8080 : 22));
         case ProfileType.v2ray:
-          return await _v2.getServerDelay(config: buildXrayConfig(p, settings), url: _testUrl)
-              .timeout(const Duration(seconds: 4), onTimeout: () => -1);
+          return await Native.pingXray(await buildXrayConfig(p, settings), url: _testUrl)
+              .timeout(const Duration(seconds: 7), onTimeout: () => -1);
         case ProfileType.proxy:
           return await tcpPing(p.s('address').trim(),
               int.tryParse(p.s('port')) ?? (p.s('kind') == 'socks5' ? 1080 : 8080));
         case ProfileType.wireguard:
-          return await _v2.getServerDelay(
-              config: buildWireguardConfig(p.s('config'), settings), url: _testUrl)
-              .timeout(const Duration(seconds: 4), onTimeout: () => -1);
+          return await Native.pingXray(
+              buildWireguardConfig(p.s('config'), settings), url: _testUrl)
+              .timeout(const Duration(seconds: 7), onTimeout: () => -1);
         case ProfileType.openvpn:
           final r = parseOvpnRemote(p.s('config'));
           if (r == null) return -1;
@@ -368,23 +349,14 @@ class VpnController extends ChangeNotifier {
         case ProfileType.chain:
           final e = byId(p.s('entry')), x = byId(p.s('exit'));
           if (e == null || x == null) return -1;
-          return await _v2.getServerDelay(config: buildChainConfig(e, x, settings), url: _testUrl)
-              .timeout(const Duration(seconds: 4), onTimeout: () => -1);
+          return await Native.pingXray(await buildChainConfig(e, x, settings), url: _testUrl)
+              .timeout(const Duration(seconds: 7), onTimeout: () => -1);
         case ProfileType.dnstt:
-          final r = p.s('resolver').trim();
-          final host = r.contains(':') ? r.split(':').first : (r.isEmpty ? '1.1.1.1' : r);
-          final port = int.tryParse(r.contains(':') ? r.split(':').last : '53') ?? 53;
-          return await tcpPing(host, port);
         case ProfileType.slowdns:
-          final dns = p.s('dns').trim();
-          final port = int.tryParse(p.s('dnsPort')) ?? 53;
-          return await tcpPing(dns.isEmpty ? '8.8.8.8' : dns, port);
         case ProfileType.openconnect:
-          final host = p.s('host').trim();
-          final port = int.tryParse(p.s('port')) ?? 443;
-          return await tcpPing(host, port);
         case ProfileType.psiphon:
-          return await tcpPing('1.1.1.1', 443);
+          // Do not show a TCP port check as if it measured a disabled VPN engine.
+          return -1;
         case ProfileType.group:
           var best = -1;
           for (final l in _leaves(p)) {
@@ -474,12 +446,12 @@ class VpnController extends ChangeNotifier {
       final int ms;
       if (_active?.type == ProfileType.openvpn) {
         ms = await _httpProbe();
-      } else if (_active?.type == ProfileType.ssh && settings.proxyOnly) {
+      } else if (_active?.type == ProfileType.ssh) {
         final sw = Stopwatch()..start();
         await _ssh.httpGet('cp.cloudflare.com', '/generate_204');
         ms = sw.elapsedMilliseconds;
       } else {
-        ms = await _v2.getConnectedServerDelay(url: _testUrl);
+        ms = await _httpProbe();
       }
       tunnelDelay = ms <= 0 ? -1 : ms;
     } catch (_) {
@@ -575,56 +547,15 @@ class VpnController extends ChangeNotifier {
 
   Future<String> coreVersion() async {
     try {
-      return await _v2.getCoreVersion();
+      return await Native.xrayVersion();
     } catch (_) {
       return 'unknown';
     }
   }
 
-  Future<List<String>> coreLogs() async {
-    try {
-      return await _v2.getLogs();
-    } catch (_) {
-      return const [];
-    }
-  }
-
-  // ---------- core status ----------
-  void _onV2(V2RayStatus st) {
-    if (_root == null) return;
-    upSpeed = st.uploadSpeed;
-    downSpeed = st.downloadSpeed;
-    upTotal = st.upload;
-    downTotal = st.download;
-    duration = st.duration;
-    _account(st.upload, st.download);
-    final rawState = st.state.toString().trim();
-    final stateStr = rawState.contains('.') ? rawState.split('.').last.toUpperCase() : rawState.toUpperCase();
-    final isConnected = stateStr == 'CONNECTED' || rawState.toUpperCase().endsWith('CONNECTED');
-    final isConnecting = stateStr == 'CONNECTING' || rawState.toUpperCase().endsWith('CONNECTING');
-    final isDisconnected = stateStr == 'DISCONNECTED' || rawState.toUpperCase().endsWith('DISCONNECTED');
-
-    if (isConnected) {
-      if (state != ConnState.connected) {
-        state = ConnState.connected;
-        _retries = 0;
-        log('Tunnel up');
-        _startHealth();
-      }
-      final u = _up;
-      if (u != null && !u.isCompleted) u.complete();
-    } else if (isConnecting) {
-      if (state != ConnState.connected) {
-        state = ConnState.connecting;
-      }
-    } else if (isDisconnected) {
-      if (state == ConnState.connected && !_userStopped) {
-        unawaited(_dropped());
-        return;
-      }
-    }
-    notifyListeners();
-  }
+  // libXray currently exposes lifecycle and structured API responses, not a
+  // general log-stream API through Invoke. Do not manufacture log entries.
+  Future<List<String>> coreLogs() async => const [];
 
   /// Adds the growth since the last status update to the usage log.
   void _account(int up, int down) {
@@ -814,7 +745,7 @@ class VpnController extends ChangeNotifier {
         unawaited(_dropped());
         return;
       }
-      if (_active?.type == ProfileType.ssh && settings.proxyOnly) return; // alive-check above is enough
+      if (_active?.type == ProfileType.ssh) return; // app is bypassed to protect the SSH transport
       // Bytes still arriving means the tunnel is alive; no need to probe.
       if (_lastCheckDown >= 0 && downTotal > _lastCheckDown) {
         _lastCheckDown = downTotal;
@@ -824,7 +755,7 @@ class VpnController extends ChangeNotifier {
       _lastCheckDown = downTotal;
       var ok = false;
       try {
-        ok = (await _v2.getConnectedServerDelay(url: _testUrl)) > 0;
+        ok = (await _httpProbe()) > 0;
       } catch (_) {}
       _failStreak = ok ? 0 : _failStreak + 1;
       if (_failStreak >= 3) {
@@ -852,7 +783,7 @@ class VpnController extends ChangeNotifier {
       await _ssh.stop();
     } catch (_) {}
     try {
-      await _v2.stopV2Ray();
+      await Native.stopXray();
     } catch (_) {}
     try {
       await Native.stopAllDaemons();
@@ -874,7 +805,7 @@ class VpnController extends ChangeNotifier {
       case ProfileType.ssh:
         return _startSsh(p);
       case ProfileType.v2ray:
-        return _launch(p.name, buildXrayConfig(p, settings), ssh: false);
+        return _launch(p.name, await buildXrayConfig(p, settings), ssh: false);
       case ProfileType.proxy:
         return _launch(p.name, buildProxyConfig(p, settings), ssh: false);
       case ProfileType.wireguard:
@@ -892,76 +823,29 @@ class VpnController extends ChangeNotifier {
       case ProfileType.chain:
         final e = byId(p.s('entry')), x = byId(p.s('exit'));
         if (e == null || x == null) throw 'Chain needs an entry and an exit server';
-        return _launch(p.name, buildChainConfig(e, x, settings), ssh: false);
+        return _launch(p.name, await buildChainConfig(e, x, settings), ssh: false);
       case ProfileType.group:
         throw 'Nested groups are not supported';
     }
   }
 
+  // These protocols previously called locally generated stub AARs that only
+  // accepted SOCKS handshakes and never carried traffic. Fail closed until the
+  // real upstream client engines are built and integrated.
   Future<void> _startDnstt(Profile p) async {
-    final domain = p.s('domain').trim();
-    if (domain.isEmpty) throw 'DNSTT requires a tunnel domain';
-    final port = int.tryParse(p.s('localPort')) ?? 1080;
-    log('Starting DNSTT engine on 127.0.0.1:$port');
-    await Native.startDnstt(p.data);
-    if (settings.proxyOnly) {
-      state = ConnState.connected;
-      _retries = 0;
-      _proxyStarted = DateTime.now();
-      log('Proxy mode: SOCKS5 on 127.0.0.1:$port');
-      _startProxyStats();
-      _startHealth();
-      notifyListeners();
-      return;
-    }
-    await _launch(p.name, buildSocksConfig(port, settings), ssh: true);
+    throw 'DNSTT is disabled: the bundled implementation was a stub, not the upstream DNSTT client.';
   }
 
   Future<void> _startSlowDns(Profile p) async {
-    final ns = p.s('ns').trim();
-    if (ns.isEmpty) throw 'SlowDNS requires a nameserver domain';
-    final port = int.tryParse(p.s('localPort')) ?? 1080;
-    log('Starting SlowDNS engine on 127.0.0.1:$port');
-    await Native.startSlowDns(p.data);
-    if (settings.proxyOnly) {
-      state = ConnState.connected;
-      _retries = 0;
-      _proxyStarted = DateTime.now();
-      log('Proxy mode: SOCKS5 on 127.0.0.1:$port');
-      _startProxyStats();
-      _startHealth();
-      notifyListeners();
-      return;
-    }
-    await _launch(p.name, buildSocksConfig(port, settings), ssh: true);
+    throw 'SlowDNS is disabled: no verified upstream Android client engine is bundled.';
   }
 
   Future<void> _startOpenConnect(Profile p) async {
-    final host = p.s('host').trim();
-    if (host.isEmpty) throw 'OpenConnect requires a server host';
-    log('Connecting OpenConnect to $host:${p.s('port').isEmpty ? '443' : p.s('port')}');
-    await Native.startOpenConnect(p.data);
-    state = ConnState.connected;
-    _retries = 0;
-    _startHealth();
-    notifyListeners();
+    throw 'OpenConnect is disabled: the bundled implementation was a stub, not libopenconnect.';
   }
 
   Future<void> _startPsiphon(Profile p) async {
-    final port = int.tryParse(p.s('socksPort')) ?? 10808;
-    log('Starting Psiphon Tunnel Core (${p.s('egress').isEmpty ? 'AUTO' : p.s('egress')}) on SOCKS:$port');
-    await Native.startPsiphon(p.data);
-    if (settings.proxyOnly) {
-      state = ConnState.connected;
-      _retries = 0;
-      _proxyStarted = DateTime.now();
-      log('Proxy mode: SOCKS5 on 127.0.0.1:$port');
-      _startProxyStats();
-      _startHealth();
-      notifyListeners();
-      return;
-    }
-    await _launch(p.name, buildSocksConfig(port, settings), ssh: true);
+    throw 'Psiphon is disabled: the bundled implementation was a stub, not Psiphon Tunnel Core.';
   }
 
   Future<void> _startOpenVpn(Profile p) async {
@@ -1109,32 +993,38 @@ class VpnController extends ChangeNotifier {
   }
 
   Future<void> _launch(String remark, String config, {required bool ssh}) async {
-    final up = Completer<void>();
-    unawaited(up.future.catchError((Object _) {}));
-    _up = up;
-    if (!settings.proxyOnly && !await _v2.requestPermission()) throw 'VPN permission denied';
-    // In SSH mode our own sockets (the SSH connection itself) must NOT be routed
-    // into the VPN, or the tunnel would loop into itself.
+    if (!settings.proxyOnly && !await Native.requestXrayPermission()) {
+      throw 'VPN permission denied';
+    }
+
+    // Validate the actual outbound with libXray before changing Android routes.
+    // pingBatch runs a temporary Xray instance and makes a real HTTPS request;
+    // it is deliberately performed before runXray because libXray serializes
+    // temporary-core operations against its managed running instance.
+    final probe = await Native.pingXray(config, url: _testUrl)
+        .timeout(const Duration(seconds: 12), onTimeout: () => -1);
+    if (probe <= 0) throw 'Xray outbound validation/connection test failed (no successful HTTPS probe)';
+
     final apps = <String>{...settings.blockedApps, if (ssh) Native.ownPackage}.toList();
     try {
-      await _v2.startV2Ray(
-        remark: remark,
+      await Native.startXray(
         config: config,
-        blockedApps: apps.isEmpty ? null : apps,
-        bypassSubnets: settings.bypassLan ? lanBypassSubnets : null,
         proxyOnly: settings.proxyOnly,
-        notificationDisconnectButtonName: "DISCONNECT",
-      );
+        disallowedApps: apps,
+        bypassLan: settings.bypassLan,
+        includedRoutes: settings.bypassLan ? lanBypassSubnets : const ['0.0.0.0/0'],
+      ).timeout(const Duration(seconds: 30), onTimeout: () => throw 'libXray startup timed out');
     } catch (e) {
-      final u = _up;
-      _up = null;
-      if (u != null && !u.isCompleted) u.completeError(e);
-      throw 'Xray start error: $e';
+      await Native.stopXray();
+      throw 'libXray start error: $e';
     }
-    await up.future.timeout(const Duration(seconds: 25), onTimeout: () {
-      _stopCore();
-      throw 'Tunnel did not come up within 25s (timeout)';
-    });
+
+    state = ConnState.connected;
+    _retries = 0;
+    _proxyStarted = DateTime.now();
+    log(settings.proxyOnly ? 'Local proxy started after a successful upstream probe' : 'libXray core started after a successful upstream probe');
+    _startHealth();
+    notifyListeners();
   }
 
   @override

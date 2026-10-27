@@ -1,6 +1,0 @@
-{
-  "name": "XRay VPN",
-  "description": "High-performance tunnel and proxy client supporting SSH, V2Ray/Xray, SOCKS5/HTTP, WireGuard, and OpenVPN with real-time throughput diagnostics.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}

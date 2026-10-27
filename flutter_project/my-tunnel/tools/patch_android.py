@@ -12,9 +12,7 @@ import math
 import os
 import re
 import shutil
-import io
 import struct
-import zipfile
 import zlib
 
 PKG = "xyz.xray.vpn"
@@ -40,7 +38,6 @@ for perm in (
     # Android 14+: a foreground service with a declared type needs the matching
     # permission, otherwise startForeground() throws and the VPN service dies.
     "FOREGROUND_SERVICE_SYSTEM_EXEMPTED",
-    "FOREGROUND_SERVICE_SPECIAL_USE",
 ):
     tag = f"android.permission.{perm}"
     if tag not in s:
@@ -80,9 +77,6 @@ if "android:scheme=\"vless\"" not in s:
         else:
             print("NOTE: no <activity> found; deep links (vless:// ...) were not registered")
 
-if 'xmlns:tools=' not in s:
-    s = re.sub(r'<manifest\b', '<manifest xmlns:tools="http://schemas.android.com/tools"', s, count=1)
-
 m = re.search(r"(?m)^([ \t]*)<application\b", s)
 if not m:
     raise SystemExit("ERROR: <application> tag not found.")
@@ -90,33 +84,10 @@ s = s[: m.start()] + perms + queries + s[m.start():]
 
 services = """
         <service
-            android:name="dev.dev7.lib.v2ray.service.V2RayVpnService"
+            android:name="xyz.xray.vpn.XrayVpnService"
             android:permission="android.permission.BIND_VPN_SERVICE"
-            android:process=":v2ray"
             android:foregroundServiceType="systemExempted"
-            android:exported="false"
-            tools:replace="android:foregroundServiceType,android:process">
-            <intent-filter>
-                <action android:name="android.net.VpnService" />
-            </intent-filter>
-        </service>
-        <service
-            android:name="dev.dev7.lib.v2ray.service.V2RayProxyOnlyService"
-            android:process=":v2ray"
-            android:foregroundServiceType="specialUse"
-            android:exported="false"
-            tools:replace="android:foregroundServiceType,android:process">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Proxy service for XRay local tunneling" />
-        </service>
-        <service
-            android:name="id.laskarmedia.openvpn_flutter.OpenVPNService"
-            android:permission="android.permission.BIND_VPN_SERVICE"
-            android:process=":openvpn"
-            android:foregroundServiceType="systemExempted"
-            android:exported="false"
-            tools:replace="android:foregroundServiceType,android:process">
+            android:exported="false">
             <intent-filter>
                 <action android:name="android.net.VpnService" />
             </intent-filter>
@@ -126,7 +97,7 @@ services = """
             android:process=":tunnel"
             android:exported="false" />
 """
-if "V2RayVpnService" not in s:
+if "xyz.xray.vpn.XrayVpnService" not in s:
     app_close = s.rfind("</application>")
     if app_close >= 0:
         s = s[:app_close] + services + s[app_close:]
@@ -155,19 +126,8 @@ for path in files:
                 "\n    packaging {\n"
                 "        jniLibs {\n"
                 "            useLegacyPackaging = true\n"
-                "            pickFirsts += listOf(\n"
-                '                "**/libgojni.so",\n'
-                '                "lib/**/libgojni.so"\n'
-                "            )\n"
                 "        }\n"
                 "        resources {\n"
-                "            pickFirsts += listOf(\n"
-                '                "go/error.java",\n'
-                '                "go/*.java",\n'
-                '                "go/**/*.java",\n'
-                '                "**/go/*.java",\n'
-                '                "**/go/error.java"\n'
-                "            )\n"
                 "            excludes += listOf(\n"
                 '                "go/error.java",\n'
                 '                "go/*.java",\n'
@@ -183,13 +143,8 @@ for path in files:
                 "\n    packagingOptions {\n"
                 "        jniLibs {\n"
                 "            useLegacyPackaging true\n"
-                "            pickFirst '**/libgojni.so'\n"
-                "            pickFirst 'lib/**/libgojni.so'\n"
                 "        }\n"
                 "        resources {\n"
-                "            pickFirst 'go/error.java'\n"
-                "            pickFirst 'go/*.java'\n"
-                "            pickFirst '**/go/*.java'\n"
                 "            exclude 'go/error.java'\n"
                 "            exclude 'go/*.java'\n"
                 "            exclude '**/go/*.java'\n"
@@ -269,23 +224,10 @@ for path in files:
 # Write ProGuard keep rules for JNI callbacks
 pg_path = "android/app/proguard-rules.pro"
 pg_rules = """
--keep class dev.dev7.lib.v2ray.** { *; }
--keep class com.v2ray.** { *; }
 -keep class id.laskarmedia.openvpn_flutter.** { *; }
+-keep class libXray.** { *; }
 -keep class de.blinkt.openvpn.** { *; }
--keep class dnstt.** { *; }
--keep class slowdns.** { *; }
--keep class psi.** { *; }
--keep class ca.psiphon.** { *; }
--keep class openconnect.** { *; }
--keep class org.infradead.openconnect.** { *; }
--dontwarn dev.dev7.lib.v2ray.**
 -dontwarn id.laskarmedia.openvpn_flutter.**
--dontwarn dnstt.**
--dontwarn slowdns.**
--dontwarn psi.**
--dontwarn ca.psiphon.**
--dontwarn openconnect.**
 """
 with open(pg_path, "w", encoding="utf-8") as f:
     f.write(pg_rules)
@@ -298,6 +240,12 @@ os.makedirs(dest_dir, exist_ok=True)
 shutil.copy("tools/native/MainActivity.kt", os.path.join(dest_dir, "MainActivity.kt"))
 if os.path.exists("tools/native/TunnelDaemonService.kt"):
     shutil.copy("tools/native/TunnelDaemonService.kt", os.path.join(dest_dir, "TunnelDaemonService.kt"))
+# XrayVpnService is the actual VpnService that establishes the Android TUN. The
+# manifest already registers it above, so fail immediately if its source is absent.
+xray_service_src = "tools/native/XrayVpnService.kt"
+if not os.path.isfile(xray_service_src):
+    raise SystemExit(f"ERROR: required native VPN service source missing: {xray_service_src}")
+shutil.copy(xray_service_src, os.path.join(dest_dir, "XrayVpnService.kt"))
 
 # ----------------------------------------------------------- launcher icon
 def png(w, h, rgba):
@@ -380,71 +328,23 @@ os.makedirs(d_draw, exist_ok=True)
 with open(os.path.join(d_draw, "ic_notification.png"), "wb") as f:
     f.write(icon(48))
 
-# ------------------------------------------------------------------- Ensure valid AAR structure (AndroidManifest.xml, R.txt, res/ + strip duplicate go.Seq)
-def strip_go_classes_from_aars():
-    libs_dir = "android/app/libs"
-    if not os.path.exists(libs_dir):
-        return
-    values_xml = b'<?xml version="1.0" encoding="utf-8"?>\n<resources>\n</resources>\n'
-    for aar_name in os.listdir(libs_dir):
-        if not aar_name.endswith(".aar"):
-            continue
-        aar_path = os.path.join(libs_dir, aar_name)
-        clean_name = aar_name[:-4].replace("-", "_").replace(".", "_")
-        pkg_name = f"com.custom.{clean_name}"
-        manifest_xml = f'<?xml version="1.0" encoding="utf-8"?>\n<manifest xmlns:android="http://schemas.android.com/apk/res/android"\n    package="{pkg_name}">\n    <uses-sdk android:minSdkVersion="23" />\n</manifest>\n'.encode("utf-8")
-        try:
-            with zipfile.ZipFile(aar_path, "r") as aar_in:
-                aar_files = {name: aar_in.read(name) for name in aar_in.namelist()}
-
-            # Remove any sources jars or go source files from the AAR
-            aar_files = {name: content for name, content in aar_files.items() if not name.endswith("-sources.jar") and not name.startswith("go/") and not name.endswith(".java")}
-
-            # If the archive was created directly from classes without classes.jar wrapper, wrap them
-            if "classes.jar" not in aar_files:
-                jar_buf = io.BytesIO()
-                with zipfile.ZipFile(jar_buf, "w", compression=zipfile.ZIP_DEFLATED) as jout:
-                    for name, content in list(aar_files.items()):
-                        if name.endswith(".class") or name.startswith("META-INF/"):
-                            jout.writestr(name, content)
-                aar_files = {"classes.jar": jar_buf.getvalue()}
-
-            # Ensure AndroidManifest.xml exists with unique package namespace
-            aar_files["AndroidManifest.xml"] = manifest_xml
-            
-            # Ensure R.txt exists
-            if "R.txt" not in aar_files:
-                aar_files["R.txt"] = b""
-
-            # Ensure res/values/values.xml exists
-            if "res/values/values.xml" not in aar_files and "res/values/" not in aar_files:
-                aar_files["res/values/values.xml"] = values_xml
-
-            jar_bytes = aar_files["classes.jar"]
-            jar_in_buf = io.BytesIO(jar_bytes)
-            jar_out_buf = io.BytesIO()
-
-            with zipfile.ZipFile(jar_in_buf, "r") as jar_in:
-                with zipfile.ZipFile(jar_out_buf, "w", compression=zipfile.ZIP_DEFLATED) as jar_out:
-                    for item in jar_in.infolist():
-                        if item.filename.startswith("go/") or item.filename.endswith(".java"):
-                            continue  # Skip duplicate go.Seq classes and java source files
-                        jar_out.writestr(item, jar_in.read(item.filename))
-
-            aar_files["classes.jar"] = jar_out_buf.getvalue()
-            with zipfile.ZipFile(aar_path, "w", compression=zipfile.ZIP_DEFLATED) as aar_out:
-                for name, content in aar_files.items():
-                    aar_out.writestr(name, content)
-            print(f"Patched AAR {aar_name} with valid structure, Manifest and clean classes.jar")
-        except Exception as e:
-            print(f"Notice patching AAR {aar_name}: {e}")
-
-strip_go_classes_from_aars()
+# Do not mutate local AARs here. Native libraries must be built and validated by
+# their own build scripts; rewriting classes.jar can strip gomobile runtime classes.
+os.makedirs("android/app/libs", exist_ok=True)
 
 # ------------------------------------------------------------------- Ensure valid test suite
 default_test = "test/widget_test.dart"
 os.makedirs("test", exist_ok=True)
-with open(default_test, "w", encoding="utf-8") as f:
-    f.write("import 'package:flutter_test/flutter_test.dart';\n\nvoid main() {\n  test('Smoke test', () {\n    expect(true, isTrue);\n  });\n}\n")
+if not os.path.exists(default_test):
+    with open(default_test, "w", encoding="utf-8") as f:
+        f.write("import 'package:flutter_test/flutter_test.dart';\n\nvoid main() {\n  test('Smoke test', () {\n    expect(true, isTrue);\n  });\n}\n")
 
-print("Android patch completed.")
+# Verify that every native class referenced by the manifest is present in the
+# generated Android source tree before Gradle is allowed to run.
+for required in ("MainActivity.kt", "XrayVpnService.kt", "TunnelDaemonService.kt"):
+    path = os.path.join(dest_dir, required)
+    if not os.path.isfile(path):
+        raise SystemExit(f"ERROR: required Android source was not generated: {path}")
+if 'android:name="xyz.xray.vpn.XrayVpnService"' not in s:
+    raise SystemExit("ERROR: XrayVpnService is not registered in AndroidManifest.xml")
+print("Android patch completed; XrayVpnService was copied and verified.")

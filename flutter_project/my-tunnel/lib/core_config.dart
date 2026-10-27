@@ -1,19 +1,35 @@
 import 'dart:convert';
 
-import 'package:flutter_v2ray_client/flutter_v2ray.dart';
-
 import 'config_tweaks.dart';
 import 'models.dart';
+import 'native.dart';
 
 export 'config_tweaks.dart' show lanBypassSubnets;
 
-String _template() => V2ray.parseFromURL('socks://127.0.0.1:1080#tpl').getFullConfiguration();
+// Minimal Xray config shell. Share-link parsing is delegated to the official
+// libXray convertShareLinksToXrayJson API rather than a second, divergent parser.
+Map<String, dynamic> _templateMap() => <String, dynamic>{
+      'log': <String, dynamic>{'loglevel': 'warning'},
+      'inbounds': <Map<String, dynamic>>[
+        <String, dynamic>{
+          'tag': 'socks-in',
+          'listen': '127.0.0.1',
+          'port': 10808,
+          'protocol': 'socks',
+          'settings': <String, dynamic>{'auth': 'noauth', 'udp': true},
+        }
+      ],
+      'outbounds': <Map<String, dynamic>>[
+        <String, dynamic>{'tag': 'proxy', 'protocol': 'freedom'},
+        <String, dynamic>{'tag': 'direct', 'protocol': 'freedom'},
+        <String, dynamic>{'tag': 'block', 'protocol': 'blackhole'},
+      ],
+    };
 
 String _withOutbound(Map<String, dynamic> outbound) {
-  final m = jsonDecode(_template()) as Map<String, dynamic>;
+  final m = _templateMap();
   final outs = (m['outbounds'] as List).cast<Map<String, dynamic>>();
-  var idx = outs.indexWhere((o) => o['tag'] == 'proxy');
-  if (idx < 0) idx = 0;
+  final idx = outs.indexWhere((o) => o['tag'] == 'proxy');
   outs[idx] = outbound;
   m['outbounds'] = outs;
   return jsonEncode(m);
@@ -22,8 +38,6 @@ String _withOutbound(Map<String, dynamic> outbound) {
 String patchDns(String cfg, AppSettings s, {bool tcpOnly = false}) =>
     patchDnsJson(cfg, s.dnsServers, tcpOnly: tcpOnly);
 
-/// Final touches shared by every Xray config: the inbound port/listen address
-/// (so the app always knows where the local proxy is) and the log level.
 String _finish(String cfg, AppSettings s, int inboundPort) =>
     applyLogLevel(applyInbound(cfg, port: inboundPort, listenAll: s.shareHotspot), s.logLevel);
 
@@ -38,10 +52,35 @@ String _tweak(String cfg, AppSettings s) => applyTweaks(
       blockQuic: s.blockQuic,
     );
 
-String buildXrayConfig(Profile p, AppSettings s) {
+Future<String> _configFromShareLink(String link, AppSettings s) async {
+  final parsed = await Native.convertShareLinkToXrayJson(link);
+  final outbounds = (parsed['outbounds'] as List?)
+      ?.whereType<Map>()
+      .map((e) => Map<String, dynamic>.from(e))
+      .toList();
+  if (outbounds == null || outbounds.isEmpty) {
+    throw 'libXray did not return a valid outbound for this share link';
+  }
+  final cfg = _templateMap();
+  cfg['outbounds'] = <Map<String, dynamic>>[
+    ...outbounds,
+    <String, dynamic>{'tag': 'direct', 'protocol': 'freedom'},
+    <String, dynamic>{'tag': 'block', 'protocol': 'blackhole'},
+  ];
+  // Keep the first parsed outbound as the app's selected proxy outbound.
+  final first = Map<String, dynamic>.from(outbounds.first);
+  first['tag'] = 'proxy';
+  cfg['outbounds']![0] = first;
+  return _finish(
+    _tweak(overrideAddress(patchDns(jsonEncode(cfg), s), ''), s),
+    s,
+    s.socksPort,
+  );
+}
+
+Future<String> buildXrayConfig(Profile p, AppSettings s) async {
   switch (p.s('mode')) {
     case 'json':
-      // Raw JSON is passed through untouched: the user owns it completely.
       final raw = p.s('json').trim();
       try {
         jsonDecode(raw);
@@ -50,62 +89,68 @@ String buildXrayConfig(Profile p, AppSettings s) {
       }
       return raw;
     case 'link':
-      return _finish(
-          _tweak(
-              overrideAddress(
-                  patchDns(V2ray.parseFromURL(p.s('link').trim()).getFullConfiguration(), s),
-                  p.connectAddr),
-              s),
-          s,
-          s.socksPort);
+      final cfg = await _configFromShareLink(p.s('link').trim(), s);
+      return overrideAddress(cfg, p.connectAddr);
     default:
-      return _finish(
-          _tweak(
-              overrideAddress(
-                  patchDns(
-                      V2ray.parseFromURL(buildShareLink(p.data, p.name)).getFullConfiguration(), s),
-                  p.connectAddr),
-              s),
-          s,
-          s.socksPort);
+      final cfg = await _configFromShareLink(buildShareLink(p.data, p.name), s);
+      return overrideAddress(cfg, p.connectAddr);
   }
 }
 
-/// HTTP / HTTPS / SOCKS5 upstream proxy as the VPN's outbound.
+/// HTTP / HTTPS / SOCKS5 upstream proxy as the Xray outbound.
 String buildProxyConfig(Profile p, AppSettings s) => _finish(
-    _tweak(
-        overrideAddress(patchDns(_withOutbound(buildProxyOutbound(p.data)), s), p.connectAddr), s),
+    _tweak(overrideAddress(patchDns(_withOutbound(buildProxyOutbound(p.data)), s), p.connectAddr), s),
     s,
     s.socksPort);
 
-/// entry -> exit chain of two Xray profiles (see [chainConfigs]).
-String buildChainConfig(Profile entry, Profile exit, AppSettings s) {
+/// entry -> exit chain of two Xray profiles.
+Future<String> buildChainConfig(Profile entry, Profile exit, AppSettings s) async {
   for (final p in [entry, exit]) {
     if (p.type != ProfileType.v2ray || p.s('mode') == 'json') {
       throw 'Chains use link/manual V2Ray profiles only (${p.name} is not)';
     }
   }
-  // Build both without tweaks, chain them, then tweak the combined config.
-  String raw(Profile p) {
+  Future<String> raw(Profile p) async {
     final link = p.s('mode') == 'link' ? p.s('link').trim() : buildShareLink(p.data, p.name);
-    return overrideAddress(
-        patchDns(V2ray.parseFromURL(link).getFullConfiguration(), s), p.connectAddr);
+    return overrideAddress(patchDns(await _configFromShareLink(link, s), s), p.connectAddr);
   }
 
-  return _finish(_tweak(chainConfigs(raw(exit), raw(entry)), s), s, s.socksPort);
+  return _finish(_tweak(chainConfigs(await raw(exit), await raw(entry)), s), s, s.socksPort);
 }
 
 String buildWireguardConfig(String conf, AppSettings s) =>
     _finish(patchDns(_withOutbound(wgToOutbound(conf)), s), s, s.socksPort);
 
-/// Xray config that forwards everything to our local SOCKS5 server (SSH mode).
+/// Xray config forwarding to the app's real SSH-backed local SOCKS listener.
 String buildSocksConfig(int port, AppSettings s) {
-  final cfg = V2ray.parseFromURL('socks://127.0.0.1:$port#SSH').getFullConfiguration();
-  // Xray's own inbound must not collide with the SSH local SOCKS server on [port].
-  return _finish(patchDns(cfg, s, tcpOnly: true), s, port >= 65535 ? port - 1 : port + 1);
+  final cfg = _templateMap();
+  cfg['inbounds'] = <Map<String, dynamic>>[
+    <String, dynamic>{
+      'tag': 'socks-in',
+      'listen': '127.0.0.1',
+      'port': port >= 65535 ? port - 1 : port + 1,
+      'protocol': 'socks',
+      'settings': <String, dynamic>{'auth': 'noauth', 'udp': true},
+    }
+  ];
+  cfg['outbounds'] = <Map<String, dynamic>>[
+    <String, dynamic>{
+      'tag': 'proxy',
+      'protocol': 'socks',
+      'settings': <String, dynamic>{
+        'servers': <Map<String, dynamic>>[
+          <String, dynamic>{'address': '127.0.0.1', 'port': port},
+        ],
+      },
+    },
+    <String, dynamic>{'tag': 'direct', 'protocol': 'freedom'},
+    <String, dynamic>{'tag': 'block', 'protocol': 'blackhole'},
+  ];
+  // The inbound and upstream SOCKS ports must be distinct.
+  return _finish(patchDns(jsonEncode(cfg), s, tcpOnly: true), s,
+      port >= 65535 ? port - 1 : port + 1);
 }
 
-/// Share link of a v2ray profile (for the QR code / clipboard), or null.
 String? shareLinkOf(Profile p) {
   if (p.type != ProfileType.v2ray) return null;
   switch (p.s('mode')) {

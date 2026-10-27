@@ -1,0 +1,7 @@
+{
+  "engine": "XTLS/libXray",
+  "release": "resolved by CI",
+  "commit": "resolved by CI",
+  "builtAtUtc": "resolved by CI",
+  "abis": ["armeabi-v7a", "arm64-v8a"]
+}

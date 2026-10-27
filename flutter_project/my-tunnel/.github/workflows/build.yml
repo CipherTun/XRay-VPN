@@ -1,12 +1,24 @@
-name: Build APK
+name: Build XRay Vpn APKs
 
 on:
   push:
   workflow_dispatch:
+    inputs:
+      libxray_ref:
+        description: "libXray release tag, or 'latest' for the newest published stable release"
+        required: false
+        default: latest
+        type: string
+
+permissions:
+  contents: read
 
 jobs:
   android:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      LIBXRAY_REF: ${{ inputs.libxray_ref || 'latest' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -19,13 +31,14 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "stable"
+          go-version: stable
           cache: true
 
+      # OpenVPN 2.0.0 requires NDK 27 for its Android 16 KB page-size-ready build.
       - name: Set up Android NDK
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r26b
+          ndk-version: r27c
           link-to-sdk: true
 
       - name: Set up Flutter
@@ -34,72 +47,131 @@ jobs:
           channel: stable
           cache: true
 
-      - run: flutter --version
-
-      # Compile native protocol libraries (DNSTT, SlowDNS, Psiphon, OpenConnect) into AARs
-      - name: Build Native Protocol Libraries
+      - name: Show toolchain versions
         run: |
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          go install golang.org/x/mobile/cmd/gobind@latest
-          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
-          export PATH=$PATH:$(go env GOPATH)/bin
-          gomobile init || true
-          chmod +x tools/build_libs/*.sh
-          ./tools/build_libs/build_all.sh
+          flutter --version
+          dart --version
+          go version
+          java -version
 
-      # Generate android/ (kept out of git) with the correct package: xyz.xray.vpn
-      - run: flutter create --platforms=android --org xyz.xray --project-name vpn .
-      - run: python3 tools/patch_android.py
+      - name: Generate Android project
+        run: flutter create --platforms=android --org xyz.xray --project-name vpn .
 
-      # Copy compiled AARs into android/app/libs/
-      - name: Install Native AARs
+      - name: Patch native VPN services
+        run: python3 tools/patch_android.py
+
+      - name: Verify generated Android sources before compilation
+        run: python3 tools/verify_android_project.py
+
+      - name: Build latest published official libXray Android AAR
+        run: python3 tools/build_libxray.py
+
+      - name: Record this build in the APK assets
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+          SOURCE_COMMIT: ${{ github.sha }}
         run: |
-          mkdir -p android/app/libs
-          cp -f tools/build_libs/*.aar android/app/libs/ 2>/dev/null || true
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          p = Path('assets/build-info.json')
+          data = json.loads(p.read_text())
+          data['appVersion'] = '2.4.0'
+          data['appBuildNumber'] = int(os.environ['BUILD_NUMBER'])
+          data['sourceCommit'] = os.environ['SOURCE_COMMIT']
+          p.write_text(json.dumps(data, indent=2) + '\n')
+          pubspec = Path('pubspec.yaml')
+          text = pubspec.read_text()
+          import re
+          text, n = re.subn(r'(?m)^version:\s*2\.4\.0\+\d+\s*$', f"version: 2.4.0+{os.environ['BUILD_NUMBER']}", text, count=1)
+          if n != 1:
+              raise SystemExit('Could not set unique app build number in pubspec.yaml')
+          pubspec.write_text(text)
+          PY
 
-      # Dart has no inline regex flags: (?i)(?m) throw "Invalid group" at runtime. Rewrite them.
-      - run: python3 tools/fix_regex_flags.py
-      - run: flutter pub get
+      # This script only repairs Dart RegExp inline flags; it does not alter VPN semantics.
+      - name: Normalize Dart regular expressions
+        run: python3 tools/fix_regex_flags.py
 
-      # Only real errors fail the build; style hints are informational.
-      - run: flutter analyze --no-fatal-infos --no-fatal-warnings
-      - run: flutter test
+      - name: Resolve latest compatible Dart dependencies
+        run: flutter pub get
 
-      # Build separate release APKs per ABI (arm64-v8a and armeabi-v7a) without mixing libraries
-      - name: Build Split Release APKs
+      - name: Static analysis
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+
+      - name: Flutter tests
+        run: flutter test
+
+      - name: Build split release APKs (ARM32 and ARM64)
         run: |
           flutter build apk --release --no-shrink --split-per-abi --target-platform android-arm,android-arm64
           cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk xray-vpn-arm64-v8a.apk
           cp build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk xray-vpn-armeabi-v7a.apk
 
-      # Verify all native cores (Xray libv2ray, OpenVPN libovpnexec, DNSTT, SlowDNS, Psiphon, OpenConnect, DartSSH libapp)
-      - name: Verify Bundled Native Cores in APKs
+      - name: Verify APK payloads and embedded build metadata
         run: |
-          echo "=== Native shared libraries in arm64-v8a APK ==="
-          unzip -l xray-vpn-arm64-v8a.apk | grep -E "lib/arm64-v8a/(libv2ray|libovpn|libapp|libflutter|lib)" || true
-          echo "=== Native shared libraries in armeabi-v7a APK ==="
-          unzip -l xray-vpn-armeabi-v7a.apk | grep -E "lib/armeabi-v7a/(libv2ray|libovpn|libapp|libflutter|lib)" || true
+          set -euo pipefail
+          for spec in "arm64-v8a: xray-vpn-arm64-v8a.apk" "armeabi-v7a: xray-vpn-armeabi-v7a.apk"; do
+            abi="${spec%%:*}"
+            apk="${spec#*: }"
+            test -s "$apk"
+            unzip -Z1 "$apk" > "${apk}.contents"
+            grep -q "^lib/$abi/libgojni.so$" "${apk}.contents" || { echo "Missing libXray Go runtime for $abi"; exit 1; }
+            grep -q '^classes[0-9]*\.dex$' "${apk}.contents" || { echo "Missing DEX bytecode in $apk"; exit 1; }
+            unzip -p "$apk" assets/flutter_assets/assets/build-info.json > "${apk%.apk}-build-info.json"
+            grep -q '"engine": "XTLS/libXray"' "${apk%.apk}-build-info.json"
+            grep -q '"release":' "${apk%.apk}-build-info.json"
+            echo "Verified $apk"
+            unzip -l "$apk" | grep "lib/$abi/.*\\.so" || true
+          done
+          cp libxray-release.txt xray-vpn-libxray-release.txt
 
-      - name: Upload arm64-v8a Release APK
+      - name: Upload ARM64 release APK
         uses: actions/upload-artifact@v4
         with:
           name: xray-vpn-arm64-v8a-apk
-          path: xray-vpn-arm64-v8a.apk
+          path: |
+            xray-vpn-arm64-v8a.apk
+            xray-vpn-arm64-v8a-build-info.json
+            xray-vpn-libxray-release.txt
+            pubspec.lock
+          if-no-files-found: error
+          retention-days: 30
 
-      - name: Upload armeabi-v7a Release APK
+      - name: Upload ARM32 release APK
         uses: actions/upload-artifact@v4
         with:
           name: xray-vpn-armeabi-v7a-apk
-          path: xray-vpn-armeabi-v7a.apk
+          path: |
+            xray-vpn-armeabi-v7a.apk
+            xray-vpn-armeabi-v7a-build-info.json
+            xray-vpn-libxray-release.txt
+            pubspec.lock
+          if-no-files-found: error
+          retention-days: 30
 
-      # Debug build for diagnosing connection issues
-      - name: Build arm64 Debug APK
+      - name: Build ARM32 debug APK for device diagnostics
+        run: |
+          flutter build apk --debug --target-platform android-arm
+          cp build/app/outputs/flutter-apk/app-debug.apk xray-vpn-debug-armeabi-v7a.apk
+
+      - name: Upload ARM32 debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: xray-vpn-debug-armeabi-v7a-apk
+          path: xray-vpn-debug-armeabi-v7a.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Build ARM64 debug APK for diagnostics
         run: |
           flutter build apk --debug --target-platform android-arm64
           cp build/app/outputs/flutter-apk/app-debug.apk xray-vpn-debug-arm64.apk
 
-      - name: Upload arm64 Debug APK
+      - name: Upload ARM64 debug APK
         uses: actions/upload-artifact@v4
         with:
           name: xray-vpn-debug-arm64-apk
           path: xray-vpn-debug-arm64.apk
+          if-no-files-found: error
+          retention-days: 14
